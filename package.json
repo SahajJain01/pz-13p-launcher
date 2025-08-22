@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "tauri build"
+    "build": "tauri build",
+    "vite": "vite"
   },
   "dependencies": {
     "react": "^18.2.0",
