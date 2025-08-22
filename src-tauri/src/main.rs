@@ -25,7 +25,7 @@ fn user_mods_dir() -> PathBuf {
 
 fn steam_root_from_registry() -> Option<String> {
   if let Ok(hkcu) = RegKey::predef(HKEY_CURRENT_USER).open_subkey("Software\\Valve\\Steam") {
-    if let Ok(sp): Result<String, _> = hkcu.get_value("SteamPath") { return Some(sp) }
+    if let Ok(sp) = hkcu.get_value::<String, _>("SteamPath") { return Some(sp) }
   }
   None
 }
@@ -46,7 +46,10 @@ fn parse_libraryfolders(steam_root: &str) -> Vec<PathBuf> {
 fn find_workshop_item(steam_root: &str, workshop_id: &str) -> Option<String> {
   for lib in parse_libraryfolders(steam_root) {
     let p = lib.join("workshop").join("content").join(APPID).join(workshop_id);
-    if p.exists() { return Some(p.to_string_lossy().to_string()) }
+    if p.exists() {
+      let s = p.to_string_lossy().replace('/', "\\");
+      return Some(s)
+    }
   }
   None
 }
@@ -54,7 +57,7 @@ fn find_workshop_item(steam_root: &str, workshop_id: &str) -> Option<String> {
 #[tauri::command]
 fn auto_detect(appid: String, workshop_id: String) -> DetectResp {
   let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
-  let workshop_path = find_workshop_item(&steam_root, &workshop_id).unwrap_or_default();
+  let workshop_path = find_workshop_item(&steam_root, &workshop_id).unwrap_or_default().replace('/', "\\");
   let mods_path = user_mods_dir().to_string_lossy().to_string();
   fs::create_dir_all(&mods_path).ok();
   DetectResp { steam_root, workshop_path, mods_path }
@@ -104,45 +107,70 @@ fn is_reparse_point(p: &Path) -> bool {
 }
 
 fn mk_junction(link: &Path, target: &Path) -> io::Result<()> {
-  // cmd /c mklink /J "link" "target"
-  let status = Command::new("cmd")
-    .args(["/c", "mklink", "/J", &format!("\"{}\"", link.display()), &format!("\"{}\"", target.display())])
+  // Use mklink /J for directory junctions on Windows. Always use backslashes and quote the paths.
+  // Normalize both paths to absolute Windows paths with backslashes and quote them
+  // Always use absolute, all-backslash Windows paths for mklink, even if they do not exist
+  let link_abs = if link.is_absolute() {
+    link.to_path_buf()
+  } else {
+    std::env::current_dir().unwrap().join(link)
+  };
+  let target_abs = if target.is_absolute() {
+    target.to_path_buf()
+  } else {
+    std::env::current_dir().unwrap().join(target)
+  };
+  let link_str = format!("\"{}\"", link_abs.to_string_lossy().replace('/', "\\"));
+  let target_str = format!("\"{}\"", target_abs.to_string_lossy().replace('/', "\\"));
+  // Use PowerShell's New-Item cmdlet to create a directory junction
+  let cmdline = format!(
+    "powershell.exe -Command \"New-Item -ItemType Junction -Path {} -Target {}\"",
+    link_str, target_str
+  );
+  let status = Command::new("powershell.exe")
+    .args(["-Command", &format!(
+      "New-Item -ItemType Junction -Path {} -Target {}",
+      link_str, target_str
+    )])
     .status()?;
-  if status.success() { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "mklink failed")) }
+  if status.success() {
+    Ok(())
+  } else {
+    Err(io::Error::new(io::ErrorKind::Other, format!("PowerShell junction failed. Command: {}", cmdline)))
+  }
 }
 
 fn rmdir_link(p: &Path) -> io::Result<()> {
-  let status = Command::new("cmd").args(["/c", "rmdir", &format!("\"{}\"", p.display())]).status()?;
+  // Remove directory junction (symlink) on Windows
+  let status = Command::new("cmd").args(["/C", "rmdir", &p.display().to_string()]).status()?;
   if status.success() { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "rmdir failed")) }
 }
 
 #[tauri::command]
 fn link_all(workshop_path: String, mods_path: String) -> Result<serde_json::Value, String> {
-  let src_root = Path::new(&workshop_path).join("mods");
-  if !src_root.exists() { return Err("No 'mods' folder in workshop item".into()); }
-  fs::create_dir_all(&mods_path).map_err(|e| e.to_string())?;
-  let backup_root = Path::new(&mods_path).join("_pzpack_backups");
-  fs::create_dir_all(&backup_root).ok();
-
-  let mut state = LockState::default();
-  for entry in fs::read_dir(&src_root).map_err(|e| e.to_string())? {
-    let entry = entry.map_err(|e| e.to_string())?;
-    if !entry.file_type().map_err(|e| e.to_string())?.is_dir() { continue; }
-    let name = entry.file_name();
-    let name = name.to_string_lossy();
-
-    let dst = Path::new(&mods_path).join(&*name);
-    if dst.exists() && !is_reparse_point(&dst) {
-      let bak = backup_root.join(format!("{}_{}", name, chrono::Utc::now().format("%Y%m%d%H%M%S")));
-      fs::rename(&dst, &bak).map_err(|e| e.to_string())?;
-      state.backups.push((dst.to_string_lossy().to_string(), bak.to_string_lossy().to_string()));
-    }
-    if !dst.exists() {
-      mk_junction(&dst, &entry.path()).map_err(|e| e.to_string())?;
-      state.links.push(dst.to_string_lossy().to_string());
+  // Link the user's mods folder directly to the Zomboid folder inside the pseudo mod
+  let target = Path::new(&workshop_path).join("mods").join("13thPandemic").join("Zomboid").join("mods");
+  if !target.exists() {
+    // Try to create the target directory if it does not exist
+    if let Err(e) = std::fs::create_dir_all(&target) {
+      return Err(format!("Failed to create target directory {}: {}", target.display(), e));
     }
   }
-  let lock_path = Path::new(&mods_path).join(".pz-links.json");
+  // Backup the user's mods folder if it exists and is not a symlink
+  let mods_path_p = Path::new(&mods_path);
+  let mut state = LockState::default();
+  let backup_root = mods_path_p.parent().unwrap_or_else(|| Path::new("C:/")).join("_pzpack_backups");
+  fs::create_dir_all(&backup_root).ok();
+  if mods_path_p.exists() && !is_reparse_point(&mods_path_p) {
+    let bak = backup_root.join(format!("mods_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")));
+    fs::rename(&mods_path_p, &bak).map_err(|e| e.to_string())?;
+    state.backups.push((mods_path_p.to_string_lossy().to_string(), bak.to_string_lossy().to_string()));
+  }
+  if !mods_path_p.exists() {
+    mk_junction(&mods_path_p, &target).map_err(|e| format!("Failed to create symlink: {} -> {}: {}", mods_path_p.display(), target.display(), e))?;
+    state.links.push(mods_path_p.to_string_lossy().to_string());
+  }
+  let lock_path = mods_path_p.parent().unwrap_or_else(|| Path::new("C:/")).join(".pz-links.json");
   fs::write(&lock_path, serde_json::to_vec(&state).unwrap()).map_err(|e| e.to_string())?;
   Ok(serde_json::json!({"linked": state.links.len(), "backups": state.backups.len()}))
 }
@@ -176,6 +204,12 @@ fn play(appid: String) -> Result<(), String> {
 }
 
 fn main() {
+  // This launcher helps Project Zomboid private server users quickly link a large modpack from a single Steam Workshop pseudo mod.
+  // 1. User subscribes to the pseudo mod (manually or via launcher).
+  // 2. Launcher waits for Steam to finish downloading the mod.
+  // 3. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
+  // 4. Launches the game.
+  // 5. On exit or cleanup, removes the symlinks and restores any backups.
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, wait_for_download, link_all, cleanup, play])
     .run(tauri::generate_context!())

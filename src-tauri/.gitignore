@@ -1,0 +1,19 @@
+# Rust/Cargo
+/target/
+
+# Tauri
+/gen/schemas
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

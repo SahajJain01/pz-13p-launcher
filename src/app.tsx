@@ -1,10 +1,12 @@
-import React, { useEffect, useState } from 'react'
-import { invoke } from '@tauri-apps/api/tauri'
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import "./App.css";
 
 const APPID = '108600'
 const WORKSHOP_ID = '3487726294'
 
-export default function App(){
+
+function App() {
   const [steamRoot, setSteamRoot] = useState('')
   const [workshopPath, setWorkshopPath] = useState('')
   const [modsPath, setModsPath] = useState('')
@@ -75,3 +77,5 @@ export default function App(){
     </div>
   )
 }
+
+export default App;
