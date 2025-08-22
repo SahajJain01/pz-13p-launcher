@@ -15,6 +15,12 @@
     "bundle": {
       "targets": ["msi"],
       "identifier": "com.sahajjain.pz13p"
+    },
+    "build": {
+      "beforeDevCommand": "bunx vite --port 5173",
+      "devPath": "http://localhost:5173",
+      "beforeBuildCommand": "bunx vite build",
+      "distDir": "../dist"
     }
   }
 }
