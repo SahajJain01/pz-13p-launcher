@@ -63,15 +63,16 @@ h1 {
 input,
 button {
   border-radius: 8px;
-  border: 1px solid transparent;
+  border: none;
   padding: 0.6em 1.2em;
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  color: #0f0f0f;
-  background-color: #ffffff;
-  transition: border-color 0.25s;
-  box-shadow: 0 2px 2px rgba(0, 0, 0, 0.2);
+  color: #e3e6ed;
+  background-color: #23293a;
+  transition: background 0.2s, color 0.2s;
+  box-shadow: none;
+  outline: none;
 }
 
 button {
@@ -79,16 +80,10 @@ button {
 }
 
 button:hover {
-  border-color: #396cd8;
+  background: #2a3142;
 }
 button:active {
-  border-color: #396cd8;
-  background-color: #e8e8e8;
-}
-
-input,
-button {
-  outline: none;
+  background: #181c24;
 }
 
 #greet-input {
@@ -97,8 +92,8 @@ button {
 
 @media (prefers-color-scheme: dark) {
   :root {
-    color: #f6f6f6;
-    background-color: #2f2f2f;
+    color: #e3e6ed;
+    background-color: #181c24;
   }
 
   a:hover {
@@ -107,10 +102,27 @@ button {
 
   input,
   button {
-    color: #ffffff;
-    background-color: #0f0f0f98;
+    color: #e3e6ed;
+    background-color: #23293a;
+    box-shadow: none;
+    border: none;
   }
   button:active {
-    background-color: #0f0f0f69;
+    background-color: #181c24;
   }
+}
+
+/* Hide scrollbars for all elements */
+::-webkit-scrollbar {
+  width: 0px;
+  background: transparent;
+}
+html, body {
+  margin: 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden !important;
+  background: #181c24 !important;
 }

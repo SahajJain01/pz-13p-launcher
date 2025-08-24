@@ -1,5 +1,4 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
   fs,
@@ -9,14 +8,16 @@ use std::{
   thread,
   time::Duration
 };
-use tauri::Manager;
-use walkdir::WalkDir;
-use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
 const APPID: &str = "108600"; // PZ
 
 #[derive(Serialize)]
-struct DetectResp { steam_root: String, workshop_path: String, mods_path: String }
+struct DetectResp {
+  steam_root: String,
+  workshop_path: String,
+  mods_path: String,
+  pz_installed: bool
+}
 
 fn user_mods_dir() -> PathBuf {
   let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:/"));
@@ -55,12 +56,34 @@ fn find_workshop_item(steam_root: &str, workshop_id: &str) -> Option<String> {
 }
 
 #[tauri::command]
-fn auto_detect(appid: String, workshop_id: String) -> DetectResp {
+fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
   let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
-  let workshop_path = find_workshop_item(&steam_root, &workshop_id).unwrap_or_default().replace('/', "\\");
+  // Check if PZ is installed by looking for the app manifest
+  let mut pz_installed = false;
+  let mut workshop_path = String::new();
+  for lib in parse_libraryfolders(&steam_root) {
+    let manifest = lib.join("appmanifest_108600.acf");
+    if manifest.exists() {
+      pz_installed = true;
+      // Also try to find the workshop path if possible
+      if let Some(wp) = find_workshop_item(&steam_root, &workshop_id) {
+        workshop_path = wp.replace('/', "\\");
+      }
+      break;
+    }
+  }
   let mods_path = user_mods_dir().to_string_lossy().to_string();
+  if !pz_installed {
+    // Not installed, don't launch Steam or open workshop
+    return DetectResp { steam_root, workshop_path, mods_path, pz_installed };
+  }
+  // If the mod folder is not found, open the workshop page for the user to subscribe
+  if workshop_path.is_empty() || !Path::new(&workshop_path).exists() {
+    let url = format!("steam://url/CommunityFilePage/{}", workshop_id);
+    let _ = open::that(url);
+  }
   fs::create_dir_all(&mods_path).ok();
-  DetectResp { steam_root, workshop_path, mods_path }
+  DetectResp { steam_root, workshop_path, mods_path, pz_installed }
 }
 
 #[tauri::command]
@@ -156,15 +179,21 @@ fn link_all(workshop_path: String, mods_path: String) -> Result<serde_json::Valu
       return Err(format!("Failed to create target directory {}: {}", target.display(), e));
     }
   }
-  // Backup the user's mods folder if it exists and is not a symlink
+  // Remove the user's mods folder if it is a junction, or back it up if it is a real directory
   let mods_path_p = Path::new(&mods_path);
   let mut state = LockState::default();
   let backup_root = mods_path_p.parent().unwrap_or_else(|| Path::new("C:/")).join("_pzpack_backups");
   fs::create_dir_all(&backup_root).ok();
-  if mods_path_p.exists() && !is_reparse_point(&mods_path_p) {
-    let bak = backup_root.join(format!("mods_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")));
-    fs::rename(&mods_path_p, &bak).map_err(|e| e.to_string())?;
-    state.backups.push((mods_path_p.to_string_lossy().to_string(), bak.to_string_lossy().to_string()));
+  if mods_path_p.exists() {
+    if is_reparse_point(&mods_path_p) {
+      // Remove the junction (do not back it up)
+      rmdir_link(&mods_path_p).map_err(|e| format!("Failed to remove junction {}: {}", mods_path_p.display(), e))?;
+    } else {
+      // Back up real directory
+      let bak = backup_root.join(format!("mods_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")));
+      fs::rename(&mods_path_p, &bak).map_err(|e| e.to_string())?;
+      state.backups.push((mods_path_p.to_string_lossy().to_string(), bak.to_string_lossy().to_string()));
+    }
   }
   if !mods_path_p.exists() {
     mk_junction(&mods_path_p, &target).map_err(|e| format!("Failed to create symlink: {} -> {}: {}", mods_path_p.display(), target.display(), e))?;
@@ -177,7 +206,8 @@ fn link_all(workshop_path: String, mods_path: String) -> Result<serde_json::Valu
 
 #[tauri::command]
 fn cleanup(mods_path: String) -> Result<serde_json::Value, String> {
-  let lock_path = Path::new(&mods_path).join(".pz-links.json");
+  let mods_path_p = Path::new(&mods_path);
+  let lock_path = mods_path_p.parent().unwrap_or_else(|| Path::new("C:/")).join(".pz-links.json");
   if !lock_path.exists() { return Ok(serde_json::json!({"removed":0,"restored":0})); }
   let bytes = fs::read(&lock_path).map_err(|e| e.to_string())?;
   let state: LockState = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -197,10 +227,44 @@ fn cleanup(mods_path: String) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn play(appid: String) -> Result<(), String> {
-  // Launch Steam -> PZ and wait for Steam child to exit is tricky; we just invoke and return.
-  // Users will hit Cleanup manually, or you can press Clean Links after quitting.
+  // Ensure Steam is running before launching PZ
+  let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
+  let mut sys = System::new_all();
+  sys.refresh_processes();
+  let steam_running = sys.processes().values().any(|p| p.name().eq_ignore_ascii_case("steam.exe"));
+  if !steam_running {
+    let steam_exe = Path::new(&steam_root).join("steam.exe");
+    let _ = Command::new(steam_exe).spawn();
+    // Give Steam a few seconds to start
+    thread::sleep(Duration::from_secs(3));
+  }
+  // Launch Steam -> PZ
   let url = format!("steam://run/{}", appid);
-  open::that(url).map_err(|e| e.to_string())
+  open::that(&url).map_err(|e| e.to_string())?;
+
+  // Wait for Project Zomboid process to exit
+  // The process name is "ProjectZomboid64.exe" (for 64-bit)
+  let pz_proc_name = "ProjectZomboid64.exe";
+  let mut found = false;
+  for _ in 0..10 {
+    sys.refresh_processes();
+    if sys.processes().values().any(|p| p.name().eq_ignore_ascii_case(pz_proc_name)) {
+      found = true;
+      break;
+    }
+    thread::sleep(Duration::from_secs(1));
+  }
+  if found {
+    // Wait until the process is gone
+    loop {
+      sys.refresh_processes();
+      if !sys.processes().values().any(|p| p.name().eq_ignore_ascii_case(pz_proc_name)) {
+        break;
+      }
+      thread::sleep(Duration::from_secs(2));
+    }
+  }
+  Ok(())
 }
 
 fn main() {
