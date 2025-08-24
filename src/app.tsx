@@ -1,5 +1,5 @@
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 // User-facing messages for each state
 const USER_MESSAGES: Record<string, string> = {
   not_found: 'Mod not found. Click Download to open the Steam Workshop page and subscribe. Once the mod finishes downloading in Steam, click Refresh.',
@@ -19,30 +19,51 @@ type Status = 'not_found' | 'downloading' | 'ready' | 'playing';
 
 function App() {
   const [showDebug, setShowDebug] = useState(false);
+  const [steamRoot, setSteamRoot] = useState('');
   const [workshopPath, setWorkshopPath] = useState('');
   const [modsPath, setModsPath] = useState('');
+  const [log, setLog] = useState('');
   const [status, setStatus] = useState<Status>('not_found');
   const [busy, setBusy] = useState(false);
+  // const [progress, setProgress] = useState<number|null>(null); // Not used
+  const downloadInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  function addLog(s: string) {
+    setLog(l => l + `[${new Date().toLocaleTimeString()}] ${s}\n`);
+  }
 
 
   // Initial detection and refresh logic
   const runAutoDetect = async () => {
     const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { appid: APPID, workshopId: WORKSHOP_ID });
-  // removed setSteamRoot
+    setSteamRoot(res.steam_root);
     setWorkshopPath(res.workshop_path);
     setModsPath(res.mods_path);
+    addLog(`Steam: ${res.steam_root}`);
+    addLog(`Workshop: ${res.workshop_path}`);
+    addLog(`Mods: ${res.mods_path}`);
     if (!res.workshop_path) {
       setStatus('not_found');
     } else {
       setStatus('ready');
     }
+    // Run cleanup after modsPath is set
+    if (res.mods_path) {
+      try {
+        await invoke('cleanup', { modsPath: res.mods_path });
+        addLog('Checked and restored mods if needed.');
+      } catch (e: any) {
+        addLog('Cleanup on auto-detect error: ' + e);
+      }
+    }
   };
 
   useEffect(() => {
-  // On launcher start, always attempt to auto-detect
-  runAutoDetect();
-  return () => {};
+    // On launcher start, auto-detect and then cleanup
+    runAutoDetect();
+    return () => {
+      if (downloadInterval.current) clearInterval(downloadInterval.current);
+    };
   }, []);
 
 
@@ -52,20 +73,27 @@ function App() {
     if (status === 'not_found') {
       setBusy(true);
       await invoke('open_workshop', { workshopId: WORKSHOP_ID });
+      addLog('Opened Workshop page in Steam. Please subscribe to the mod, then click Refresh after download completes.');
       setBusy(false);
     } else if (status === 'ready') {
       setBusy(true);
       setStatus('playing');
       try {
-  await invoke<{ linked: number, backups: number }>('link_all', { workshopPath, modsPath });
+        const r = await invoke<{ linked: number, backups: number }>('link_all', { workshopPath, modsPath });
+        addLog(`Linked ${r.linked} mods; backed up ${r.backups}`);
         await invoke('play', { appid: APPID });
+        addLog('Game session ended');
+        await invoke('cleanup', { modsPath });
+        addLog('Restored old mods');
       } catch (e: any) {
+        addLog('Play error: ' + e);
       }
       setStatus('ready');
       setBusy(false);
     }
   };
 
+  // Manual restore button
 
   let mainLabel = 'Play';
   if (status === 'not_found') mainLabel = 'Download';
@@ -195,7 +223,30 @@ function App() {
         )}
       </div>
 
-
+      {showDebug && (
+        <div style={{
+          position: 'fixed',
+          bottom: 64,
+          right: 32,
+          width: 420,
+          maxWidth: '90vw',
+          border: '2px solid #3a4660',
+          borderRadius: 16,
+          background: 'linear-gradient(135deg, #23293a 80%, #2a3142 100%)',
+          color: '#eee',
+          padding: 20,
+          zIndex: 100,
+          boxShadow: '0 8px 32px #000b, 0 1.5px 0 #7faaff44',
+          filter: 'drop-shadow(0 2px 12px #0008)',
+        }}>
+          <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+            <div>Steam root</div><input value={steamRoot} onChange={e => setSteamRoot(e.target.value)} style={{ background: '#181c24', color: '#fff', border: '1px solid #2a3142', borderRadius: 5, padding: 4 }} />
+            <div>Workshop</div><input value={workshopPath} onChange={e => setWorkshopPath(e.target.value)} style={{ background: '#181c24', color: '#fff', border: '1px solid #2a3142', borderRadius: 5, padding: 4 }} />
+            <div>Mods dir</div><input value={modsPath} onChange={e => setModsPath(e.target.value)} style={{ background: '#181c24', color: '#fff', border: '1px solid #2a3142', borderRadius: 5, padding: 4 }} />
+          </div>
+          <pre style={{ background: '#181c24', color: '#7faaff', padding: 12, height: 200, overflow: 'auto', borderRadius: 6 }}>{log}</pre>
+        </div>
+      )}
     </div>
   );
 }

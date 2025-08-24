@@ -1,5 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use serde::{Deserialize, Serialize};
+use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+use regex::Regex;
+use walkdir::WalkDir;
+use sysinfo::System;
 use std::{
   fs,
   io,
