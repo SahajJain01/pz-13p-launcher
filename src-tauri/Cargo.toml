@@ -27,7 +27,6 @@ sysinfo = "0.30"
 # Added for mod launcher functionality
 regex = "1"
 winreg = "0.52"
-walkdir = "2"
 chrono = "0.4"
 dirs = "5"
 open = "5"

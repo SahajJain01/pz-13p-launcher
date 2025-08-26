@@ -2,7 +2,6 @@
 use serde::{Deserialize, Serialize};
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 use regex::Regex;
-use walkdir::WalkDir;
 use sysinfo::System;
 use std::{
   fs,
@@ -20,7 +19,6 @@ struct DetectResp {
   steam_root: String,
   workshop_path: String,
   mods_path: String,
-  pz_installed: bool
 }
 
 fn user_mods_dir() -> PathBuf {
@@ -60,7 +58,7 @@ fn find_workshop_item(steam_root: &str, workshop_id: &str) -> Option<String> {
 }
 
 #[tauri::command]
-fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
+fn auto_detect(workshop_id: String) -> DetectResp {
   let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
   // Check if PZ is installed by looking for the app manifest
   let mut pz_installed = false;
@@ -79,7 +77,7 @@ fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
   let mods_path = user_mods_dir().to_string_lossy().to_string();
   if !pz_installed {
     // Not installed, don't launch Steam or open workshop
-    return DetectResp { steam_root, workshop_path, mods_path, pz_installed };
+    return DetectResp { steam_root, workshop_path, mods_path };
   }
   // If the mod folder is not found, open the workshop page for the user to subscribe
   if workshop_path.is_empty() || !Path::new(&workshop_path).exists() {
@@ -87,38 +85,13 @@ fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
     let _ = open::that(url);
   }
   fs::create_dir_all(&mods_path).ok();
-  DetectResp { steam_root, workshop_path, mods_path, pz_installed }
+  DetectResp { steam_root, workshop_path, mods_path }
 }
 
 #[tauri::command]
 fn open_workshop(workshop_id: String) -> Result<(), String> {
   let url = format!("steam://url/CommunityFilePage/{}", workshop_id);
   open::that(url).map_err(|e| e.to_string())
-}
-
-fn dir_size(path: &Path) -> u64 {
-  let mut total = 0;
-  for e in WalkDir::new(path).min_depth(0).into_iter().filter_map(|e| e.ok()) {
-    if e.file_type().is_file() {
-      if let Ok(md) = e.metadata() { total += md.len(); }
-    }
-  }
-  total
-}
-
-#[tauri::command]
-fn wait_for_download(workshop_path: String) -> Result<(), String> {
-  let mods = Path::new(&workshop_path).join("mods");
-  let mut last = 0; let mut stable = 0;
-  for _ in 0..6000 { // ~100 minutes max
-    if mods.exists() {
-      let sz = dir_size(&mods);
-      if sz == last { stable += 1 } else { stable = 0; last = sz; }
-      if stable >= 5 { return Ok(()); }
-    }
-    thread::sleep(Duration::from_secs(1));
-  }
-  Err("Timeout waiting for download".into())
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -229,6 +202,9 @@ fn cleanup(mods_path: String) -> Result<serde_json::Value, String> {
   Ok(serde_json::json!({"removed": removed, "restored": restored}))
 }
 
+const SERVER_IP: &str = "pz.13thpandemic.net";
+const SERVER_PORT: u16 = 16261;
+
 #[tauri::command]
 fn play(appid: String) -> Result<(), String> {
   // Ensure Steam is running before launching PZ
@@ -242,8 +218,11 @@ fn play(appid: String) -> Result<(), String> {
     // Give Steam a few seconds to start
     thread::sleep(Duration::from_secs(3));
   }
-  // Launch Steam -> PZ
-  let url = format!("steam://run/{}", appid);
+  // Launch Steam -> PZ and auto-connect to the server
+  let url = format!(
+    "steam://run/{}//-connect={} -port={}",
+    appid, SERVER_IP, SERVER_PORT
+  );
   open::that(&url).map_err(|e| e.to_string())?;
 
   // Wait for Project Zomboid process to exit
@@ -274,12 +253,11 @@ fn play(appid: String) -> Result<(), String> {
 fn main() {
   // This launcher helps Project Zomboid private server users quickly link a large modpack from a single Steam Workshop pseudo mod.
   // 1. User subscribes to the pseudo mod (manually or via launcher).
-  // 2. Launcher waits for Steam to finish downloading the mod.
-  // 3. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
-  // 4. Launches the game.
-  // 5. On exit or cleanup, removes the symlinks and restores any backups.
-  tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, wait_for_download, link_all, cleanup, play])
+    // 2. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
+    // 3. Launches the game and connects to the server.
+    // 4. On exit or cleanup, removes the symlinks and restores any backups.
+    tauri::Builder::default()
+      .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play])
     .run(tauri::generate_context!())
     .expect("error while running tauri app");
 }
