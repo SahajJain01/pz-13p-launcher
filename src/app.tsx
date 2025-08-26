@@ -1,18 +1,24 @@
 
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+type Status = 'not_found' | 'ready' | 'playing';
+
 // User-facing messages for each state
-const USER_MESSAGES: Record<string, string> = {
+const USER_MESSAGES: Record<Status, string> = {
   not_found: 'Mod not found. Click Download to open the Steam Workshop page and subscribe. Once the mod finishes downloading in Steam, click Refresh.',
   ready: 'Ready to play! Click Play to start Project Zomboid with the modpack and join the server.',
   playing: 'Game is running. Please wait until the session ends.',
 };
-import { invoke } from "@tauri-apps/api/core";
-
 
 const APPID = '108600';
 const WORKSHOP_ID = '3487726294';
 
-type Status = 'not_found' | 'ready' | 'playing';
+const MAIN_LABELS: Record<Status, string> = {
+  not_found: 'Download',
+  ready: 'Play',
+  playing: 'Playing...'
+};
 
 
 
@@ -32,26 +38,28 @@ function App() {
 
   // Initial detection and refresh logic
   const runAutoDetect = async () => {
-    const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { workshopId: WORKSHOP_ID });
-    setSteamRoot(res.steam_root);
-    setWorkshopPath(res.workshop_path);
-    setModsPath(res.mods_path);
-    addLog(`Steam: ${res.steam_root}`);
-    addLog(`Workshop: ${res.workshop_path}`);
-    addLog(`Mods: ${res.mods_path}`);
-    if (!res.workshop_path) {
-      setStatus('not_found');
-    } else {
-      setStatus('ready');
-    }
-    // Run cleanup after modsPath is set
-    if (res.mods_path) {
-      try {
-        await invoke('cleanup', { modsPath: res.mods_path });
-        addLog('Checked and restored mods if needed.');
-      } catch (e: any) {
-        addLog('Cleanup on auto-detect error: ' + e);
+    try {
+      const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>(
+        'auto_detect',
+        { workshopId: WORKSHOP_ID }
+      );
+      setSteamRoot(res.steam_root);
+      setWorkshopPath(res.workshop_path);
+      setModsPath(res.mods_path);
+      addLog(`Steam: ${res.steam_root}`);
+      addLog(`Workshop: ${res.workshop_path}`);
+      addLog(`Mods: ${res.mods_path}`);
+      setStatus(res.workshop_path ? 'ready' : 'not_found');
+      if (res.mods_path) {
+        try {
+          await invoke('cleanup', { modsPath: res.mods_path });
+          addLog('Checked and restored mods if needed.');
+        } catch (e: any) {
+          addLog('Cleanup on auto-detect error: ' + e);
+        }
       }
+    } catch (e: any) {
+      addLog('Auto-detect error: ' + e);
     }
   };
 
@@ -89,9 +97,7 @@ function App() {
 
   // Manual restore button
 
-  let mainLabel = 'Play';
-  if (status === 'not_found') mainLabel = 'Download';
-  else if (status === 'playing') mainLabel = 'Playing...';
+  const mainLabel = MAIN_LABELS[status];
 
   return (
     <div style={{
