@@ -1,10 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 use regex::Regex;
 
 use sysinfo::System;
-use walkdir::WalkDir;
 
 use std::{
   fs,
@@ -126,10 +125,6 @@ fn mk_junction(link: &Path, target: &Path) -> io::Result<()> {
   let link_str = format!("\"{}\"", link_abs.to_string_lossy().replace('/', "\\"));
   let target_str = format!("\"{}\"", target_abs.to_string_lossy().replace('/', "\\"));
   // Use PowerShell's New-Item cmdlet to create a directory junction
-  let cmdline = format!(
-    "powershell.exe -Command \"New-Item -ItemType Junction -Path {} -Target {}\"",
-    link_str, target_str
-  );
   let status = Command::new("powershell.exe")
     .args(["-Command", &format!(
       "New-Item -ItemType Junction -Path {} -Target {}",
@@ -139,7 +134,10 @@ fn mk_junction(link: &Path, target: &Path) -> io::Result<()> {
   if status.success() {
     Ok(())
   } else {
-    Err(io::Error::new(io::ErrorKind::Other, format!("PowerShell junction failed. Command: {}", cmdline)))
+    Err(io::Error::new(
+      io::ErrorKind::Other,
+      format!("PowerShell junction failed: {} -> {}", link_str, target_str),
+    ))
   }
 }
 
@@ -180,7 +178,8 @@ fn link_all(workshop_path: String, mods_path: String) -> Result<serde_json::Valu
     state.links.push(mods_path_p.to_string_lossy().to_string());
   }
   let lock_path = mods_path_p.parent().unwrap_or_else(|| Path::new("C:/")).join(".pz-links.json");
-  fs::write(&lock_path, serde_json::to_vec(&state).unwrap()).map_err(|e| e.to_string())?;
+  let data = serde_json::to_vec(&state).map_err(|e| e.to_string())?;
+  fs::write(&lock_path, data).map_err(|e| e.to_string())?;
   Ok(serde_json::json!({"linked": state.links.len(), "backups": state.backups.len()}))
 }
 
