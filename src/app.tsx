@@ -35,7 +35,7 @@ function App() {
 
   // Initial detection and refresh logic
   const runAutoDetect = async () => {
-    const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { appid: APPID, workshopId: WORKSHOP_ID });
+    const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { workshopId: WORKSHOP_ID });
     setSteamRoot(res.steam_root);
     setWorkshopPath(res.workshop_path);
     setModsPath(res.mods_path);
