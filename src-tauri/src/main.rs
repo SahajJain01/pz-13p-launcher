@@ -2,7 +2,10 @@
 use serde::Serialize;
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 use regex::Regex;
+
+use sysinfo::System;
 use walkdir::WalkDir;
+
 use std::{
   fs,
   io,
@@ -92,31 +95,6 @@ fn auto_detect(workshop_id: String) -> DetectResp {
 fn open_workshop(workshop_id: String) -> Result<(), String> {
   let url = format!("steam://url/CommunityFilePage/{}", workshop_id);
   open::that(url).map_err(|e| e.to_string())
-}
-
-fn dir_size(path: &Path) -> u64 {
-  let mut total = 0;
-  for e in WalkDir::new(path).min_depth(0).into_iter().filter_map(|e| e.ok()) {
-    if e.file_type().is_file() {
-      if let Ok(md) = e.metadata() { total += md.len(); }
-    }
-  }
-  total
-}
-
-#[tauri::command]
-fn wait_for_download(workshop_path: String) -> Result<(), String> {
-  let mods = Path::new(&workshop_path).join("mods");
-  let mut last = 0; let mut stable = 0;
-  for _ in 0..6000 { // ~100 minutes max
-    if mods.exists() {
-      let sz = dir_size(&mods);
-      if sz == last { stable += 1 } else { stable = 0; last = sz; }
-      if stable >= 5 { return Ok(()); }
-    }
-    thread::sleep(Duration::from_secs(1));
-  }
-  Err("Timeout waiting for download".into())
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -272,12 +250,11 @@ fn play(appid: String) -> Result<(), String> {
 fn main() {
   // This launcher helps Project Zomboid private server users quickly link a large modpack from a single Steam Workshop pseudo mod.
   // 1. User subscribes to the pseudo mod (manually or via launcher).
-  // 2. Launcher waits for Steam to finish downloading the mod.
-  // 3. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
-  // 4. Launches the game.
-  // 5. On exit or cleanup, removes the symlinks and restores any backups.
+  // 2. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
+  // 3. Launches the game.
+  // 4. On exit or cleanup, removes the symlinks and restores any backups.
   tauri::Builder::default()
-    .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, wait_for_download, link_all, cleanup, play])
+    .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play])
     .run(tauri::generate_context!())
     .expect("error while running tauri app");
 }
