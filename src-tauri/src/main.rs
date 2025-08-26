@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 use regex::Regex;
+
 use sysinfo::System;
+use walkdir::WalkDir;
+
 use std::{
   fs,
   io,
@@ -19,7 +22,6 @@ struct DetectResp {
   steam_root: String,
   workshop_path: String,
   mods_path: String,
-  pz_installed: bool
 }
 
 fn user_mods_dir() -> PathBuf {
@@ -59,7 +61,7 @@ fn find_workshop_item(steam_root: &str, workshop_id: &str) -> Option<String> {
 }
 
 #[tauri::command]
-fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
+fn auto_detect(workshop_id: String) -> DetectResp {
   let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
   // Check if PZ is installed by looking for the app manifest
   let mut pz_installed = false;
@@ -78,7 +80,7 @@ fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
   let mods_path = user_mods_dir().to_string_lossy().to_string();
   if !pz_installed {
     // Not installed, don't launch Steam or open workshop
-    return DetectResp { steam_root, workshop_path, mods_path, pz_installed };
+    return DetectResp { steam_root, workshop_path, mods_path };
   }
   // If the mod folder is not found, open the workshop page for the user to subscribe
   if workshop_path.is_empty() || !Path::new(&workshop_path).exists() {
@@ -86,7 +88,7 @@ fn auto_detect(_appid: String, workshop_id: String) -> DetectResp {
     let _ = open::that(url);
   }
   fs::create_dir_all(&mods_path).ok();
-  DetectResp { steam_root, workshop_path, mods_path, pz_installed }
+  DetectResp { steam_root, workshop_path, mods_path }
 }
 
 #[tauri::command]

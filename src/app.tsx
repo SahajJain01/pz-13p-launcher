@@ -1,5 +1,5 @@
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 // User-facing messages for each state
 const USER_MESSAGES: Record<string, string> = {
   not_found: 'Mod not found. Click Download to open the Steam Workshop page and subscribe. Once the mod finishes downloading in Steam, click Refresh.',
@@ -13,7 +13,7 @@ import "./app.css";
 const APPID = '108600';
 const WORKSHOP_ID = '3487726294';
 
-type Status = 'not_found' | 'downloading' | 'ready' | 'playing';
+type Status = 'not_found' | 'ready' | 'playing';
 
 
 
@@ -25,8 +25,6 @@ function App() {
   const [log, setLog] = useState('');
   const [status, setStatus] = useState<Status>('not_found');
   const [busy, setBusy] = useState(false);
-  // const [progress, setProgress] = useState<number|null>(null); // Not used
-  const downloadInterval = useRef<ReturnType<typeof setInterval> | null>(null);
 
   function addLog(s: string) {
     setLog(l => l + `[${new Date().toLocaleTimeString()}] ${s}\n`);
@@ -35,7 +33,7 @@ function App() {
 
   // Initial detection and refresh logic
   const runAutoDetect = async () => {
-    const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { appid: APPID, workshopId: WORKSHOP_ID });
+    const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { workshopId: WORKSHOP_ID });
     setSteamRoot(res.steam_root);
     setWorkshopPath(res.workshop_path);
     setModsPath(res.mods_path);
@@ -61,9 +59,6 @@ function App() {
   useEffect(() => {
     // On launcher start, auto-detect and then cleanup
     runAutoDetect();
-    return () => {
-      if (downloadInterval.current) clearInterval(downloadInterval.current);
-    };
   }, []);
 
 
