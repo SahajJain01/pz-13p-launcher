@@ -1,8 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 use regex::Regex;
+
 use sysinfo::System;
+use walkdir::WalkDir;
+
 use std::{
   fs,
   io,
@@ -253,11 +256,13 @@ fn play(appid: String) -> Result<(), String> {
 fn main() {
   // This launcher helps Project Zomboid private server users quickly link a large modpack from a single Steam Workshop pseudo mod.
   // 1. User subscribes to the pseudo mod (manually or via launcher).
-    // 2. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
-    // 3. Launches the game and connects to the server.
-    // 4. On exit or cleanup, removes the symlinks and restores any backups.
-    tauri::Builder::default()
-      .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play])
+
+  // 2. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
+  // 3. Launches the game.
+  // 4. On exit or cleanup, removes the symlinks and restores any backups.
+  tauri::Builder::default()
+    .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play])
+
     .run(tauri::generate_context!())
     .expect("error while running tauri app");
 }
