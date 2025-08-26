@@ -205,6 +205,9 @@ fn cleanup(mods_path: String) -> Result<serde_json::Value, String> {
   Ok(serde_json::json!({"removed": removed, "restored": restored}))
 }
 
+const SERVER_IP: &str = "pz.13thpandemic.net";
+const SERVER_PORT: u16 = 16261;
+
 #[tauri::command]
 fn play(appid: String) -> Result<(), String> {
   // Ensure Steam is running before launching PZ
@@ -218,8 +221,11 @@ fn play(appid: String) -> Result<(), String> {
     // Give Steam a few seconds to start
     thread::sleep(Duration::from_secs(3));
   }
-  // Launch Steam -> PZ
-  let url = format!("steam://run/{}", appid);
+  // Launch Steam -> PZ and auto-connect to the server
+  let url = format!(
+    "steam://run/{}//-connect={} -port={}",
+    appid, SERVER_IP, SERVER_PORT
+  );
   open::that(&url).map_err(|e| e.to_string())?;
 
   // Wait for Project Zomboid process to exit
@@ -250,11 +256,13 @@ fn play(appid: String) -> Result<(), String> {
 fn main() {
   // This launcher helps Project Zomboid private server users quickly link a large modpack from a single Steam Workshop pseudo mod.
   // 1. User subscribes to the pseudo mod (manually or via launcher).
+
   // 2. On Play, launcher symlinks all submods from the pseudo mod's workshop folder into the user's mods folder.
   // 3. Launches the game.
   // 4. On exit or cleanup, removes the symlinks and restores any backups.
   tauri::Builder::default()
     .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play])
+
     .run(tauri::generate_context!())
     .expect("error while running tauri app");
 }

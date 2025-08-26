@@ -3,11 +3,10 @@ import { useEffect, useState } from "react";
 // User-facing messages for each state
 const USER_MESSAGES: Record<string, string> = {
   not_found: 'Mod not found. Click Download to open the Steam Workshop page and subscribe. Once the mod finishes downloading in Steam, click Refresh.',
-  ready: 'Ready to play! Click Play to start Project Zomboid with the modpack.',
+  ready: 'Ready to play! Click Play to start Project Zomboid with the modpack and join the server.',
   playing: 'Game is running. Please wait until the session ends.',
 };
 import { invoke } from "@tauri-apps/api/core";
-import "./app.css";
 
 
 const APPID = '108600';
