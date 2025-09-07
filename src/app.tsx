@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import "./app.css";
 
 type Status = 'not_found' | 'ready' | 'playing';
@@ -24,12 +24,10 @@ const MAIN_LABELS: Record<Status, string> = {
 
 function App() {
   const [showSettings, setShowSettings] = useState(false);
-  const [showConsole, setShowConsole] = useState(false);
   const [steamRoot, setSteamRoot] = useState('');
   const [workshopPath, setWorkshopPath] = useState('');
-  const [modsPath, setModsPath] = useState('');
-  const [modsRealPath, setModsRealPath] = useState('');
   const [cachedirPath, setCachedirPath] = useState('');
+  const [gameRootPath, setGameRootPath] = useState('');
   const [log, setLog] = useState('');
   const [status, setStatus] = useState<Status>('not_found');
   const [busy, setBusy] = useState(false);
@@ -51,7 +49,6 @@ function App() {
       const res = await invoke<{ steam_root: string, workshop_path: string, mods_path: string }>('auto_detect', { workshopId: WORKSHOP_ID });
       setSteamRoot(res.steam_root);
       setWorkshopPath(res.workshop_path);
-      setModsPath(res.mods_path);
       addLog(`Steam: ${res.steam_root}`);
       addLog(`Workshop: ${res.workshop_path}`);
       addLog(`Mods (user): ${res.mods_path}`);
@@ -59,10 +56,10 @@ function App() {
       const cz = res.workshop_path ? `${res.workshop_path}\\mods\\13thPandemic\\Zomboid` : '';
       setCachedirPath(cz);
       try {
-        const realMods = await invoke<string>('resolve_workshop_mods', { workshopPath: res.workshop_path });
-        setModsRealPath(realMods);
+        const gameRoot = await invoke<string>('resolve_game_root');
+        setGameRootPath(gameRoot);
       } catch {
-        setModsRealPath(res.workshop_path ? `${res.workshop_path}\\mods\\13thPandemic\\Zomboid\\Mods` : '');
+        setGameRootPath('');
       }
     } catch (e: unknown) {
       addLog('Auto-detect error: ' + (e instanceof Error ? e.message : String(e)));
@@ -95,37 +92,27 @@ function App() {
     }
   };
 
-  const handleMoveWorkshop = async () => {
-    if (!workshopPath) { addLog('Workshop path not detected yet. Click Refresh.'); return; }
+  const handleApplyOptimizations = async () => {
+    if (!workshopPath) {
+      await message('Workshop path not detected yet. Click Refresh.');
+      return;
+    }
     try {
       setBusy(true);
-      const picked = await openDialog({ directory: true, multiple: false, title: 'Pick destination for the mods folder' });
-      const destDir = Array.isArray(picked) ? picked[0] : picked;
-      if (!destDir) { addLog('Move canceled'); return; }
-      const res = await invoke<{ new_path: string }>('move_workshop', { workshopPath, workshopId: WORKSHOP_ID, destDir: destDir as string });
-      addLog(`Moved mods folder to: ${(res as any).new_path}`);
-      addLog('Updated junction at workshop/mods/13thPandemic/Zomboid/Mods');
-      setModsRealPath((res as any).new_path);
-      setCachedirPath(`${workshopPath}\\mods\\13thPandemic\\Zomboid`);
-      await runAutoDetect();
+      const res = await invoke<{ already?: boolean; applied?: boolean; copied?: number; replaced?: number; source: string; dest: string }>(
+        'apply_optimizations',
+        { workshopPath }
+      );
+      if ((res as any).already) {
+        await message('Optimizations already applied.');
+      } else {
+        const copied = (res as any).copied ?? 0;
+        const replaced = (res as any).replaced ?? 0;
+        await message(`Optimizations applied. Copied: ${copied}, Replaced: ${replaced}.`);
+        addLog(`Optimizations applied to ${(res as any).dest} from ${(res as any).source}. Copied ${copied}, replaced ${replaced}.`);
+      }
     } catch (e: unknown) {
-      addLog('Move failed: ' + (e instanceof Error ? e.message : String(e)));
-    } finally { setBusy(false); }
-  };
-
-  const handleRestoreWorkshop = async () => {
-    if (!workshopPath) { addLog('Workshop path not detected yet. Click Refresh.'); return; }
-    try {
-      setBusy(true);
-      const res = await invoke<{ restored: boolean, path: string }>('restore_workshop', { workshopPath, workshopId: WORKSHOP_ID });
-      if ((res as any).restored) {
-        addLog('Restored mods to workshop and removed junction');
-        setModsRealPath(`${workshopPath}\\mods\\13thPandemic\\Zomboid\\Mods`);
-        setCachedirPath(`${workshopPath}\\mods\\13thPandemic\\Zomboid`);
-        await runAutoDetect();
-      } else { addLog('Nothing to restore'); }
-    } catch (e: unknown) {
-      addLog('Restore failed: ' + (e instanceof Error ? e.message : String(e)));
+      await message('Optimization apply failed: ' + (e instanceof Error ? e.message : String(e)));
     } finally { setBusy(false); }
   };
 
@@ -146,52 +133,58 @@ function App() {
             }}>
             {mainLabel}
           </button>
-          <button className="main-button secondary" disabled={busy || status === 'playing'} onClick={() => setShowSettings(s => !s)} title={showSettings ? 'Hide Settings' : 'Show Settings'}>
-            Settings
-          </button>
         </div>
         {status === 'not_found' && (
           <button className="refresh-button" style={{ cursor: busy ? 'not-allowed' : 'pointer', opacity: busy ? 0.5 : 1 }} onClick={runAutoDetect} disabled={busy}>Refresh</button>
         )}
+        <button className="refresh-button" onClick={handleApplyOptimizations} disabled={busy || status !== 'ready'}>Apply Optimizations</button>
       </div>
 
       {showSettings && (
         <div className="debug-panel">
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom: 8 }}>
+            <div style={{ fontWeight: 600, color:'#7faaff' }}>Settings & Console</div>
+            <button className="icon-button" onClick={() => setShowSettings(false)} title="Close">✖</button>
+          </div>
           <div className="debug-panel-grid">
             <div>Steam root</div>
             <div style={{display:'flex', gap:6}}>
               <input value={steamRoot} onChange={e => setSteamRoot(e.target.value)} />
-              <button className="icon-button" onClick={() => openFolder(steamRoot)} title="Open folder">📂</button>
+              <button className="icon-button" onClick={() => openFolder(steamRoot)} title="Open folder">Open</button>
             </div>
-            <div>Steam workshop folder for PZ</div>
+
+            <div>Workshop parent</div>
             <div style={{display:'flex', gap:6}}>
               <input value={workshopPath ? workshopPath.split(/[/\\]/).slice(0,-1).join('\\') : ''} onChange={() => {}} readOnly />
-              <button className="icon-button" onClick={() => openFolder(workshopPath ? workshopPath.split(/[/\\]/).slice(0,-1).join('\\') : '')} title="Open folder">📂</button>
+              <button className="icon-button" onClick={() => openFolder(workshopPath ? workshopPath.split(/[/\\]/).slice(0,-1).join('\\') : '')} title="Open folder">Open</button>
             </div>
+
             <div>Cachedir location</div>
             <div style={{display:'flex', gap:6}}>
               <input value={cachedirPath} onChange={e => setCachedirPath(e.target.value)} />
-              <button className="icon-button" onClick={() => openFolder(cachedirPath)} title="Open folder">📂</button>
+              <button className="icon-button" onClick={() => openFolder(cachedirPath)} title="Open folder">Open</button>
             </div>
-            <div>Current mod location</div>
+
+            <div>Game root</div>
             <div style={{display:'flex', gap:6}}>
-              <input value={modsRealPath || (workshopPath ? `${workshopPath}\\mods\\13thPandemic\\Zomboid\\Mods` : '')} onChange={e => setModsRealPath(e.target.value)} />
-              <button className="icon-button" onClick={() => openFolder(modsRealPath || (workshopPath ? `${workshopPath}\\mods\\13thPandemic\\Zomboid\\Mods` : ''))} title="Open folder">📂</button>
+              <input value={gameRootPath} onChange={() => {}} readOnly />
+              <button className="icon-button" onClick={() => openFolder(gameRootPath)} title="Open folder">Open</button>
             </div>
           </div>
-          <div style={{ display:'flex', gap: 8, marginTop: 8 }}>
-            <button className="refresh-button" onClick={handleMoveWorkshop} disabled={busy || status === 'playing'}>Move Mod Folder</button>
-            <button className="refresh-button" onClick={handleRestoreWorkshop} disabled={busy || status === 'playing'}>Restore to Steam</button>
-          </div>
+          <pre className="debug-log">{log}</pre>
         </div>
       )}
 
-      <div className="debug-panel" style={{ display: showConsole ? 'block' : 'none' }}>
-        <pre className="debug-log">{log}</pre>
+      <div className="debug-toggle-wrapper">
+        <button
+          onClick={() => setShowSettings(s => !s)}
+          className={`debug-toggle${showSettings ? ' active' : ''}`}
+          title={showSettings ? 'Hide Settings & Console' : 'Show Settings & Console'}>
+          ⚙️
+        </button>
       </div>
     </div>
   );
 }
 
 export default App;
-

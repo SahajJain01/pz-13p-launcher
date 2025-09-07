@@ -47,7 +47,7 @@ body {
 .debug-toggle-wrapper {
   position: fixed;
   bottom: 24px;
-  right: 64px;
+  right: 24px;
   z-index: 19;
 }
 
@@ -74,9 +74,7 @@ body {
   background: #23293a;
 }
 
-/* Make the first toggle show a gear icon via CSS */
-.debug-toggle-wrapper > button:first-child span { display: none; }
-.debug-toggle-wrapper > button:first-child::after { content: '⚙️'; }
+/* Debug toggle shows a single icon from JSX */
 
 .main-panel {
   max-width: 420px;

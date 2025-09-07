@@ -147,196 +147,11 @@ fn rmdir_link(p: &Path) -> io::Result<()> {
   if status.success() { Ok(()) } else { Err(io::Error::new(io::ErrorKind::Other, "rmdir failed")) }
 }
 
-fn ps_escape_single(s: &str) -> String { s.replace('\'', "''") }
+// Removed: junction target query and cross-volume move helpers (feature purged)
 
-fn query_junction_target(p: &Path) -> Option<PathBuf> {
-  // Query junction target using PowerShell's Get-Item .Target
-  let p_str = p.to_string_lossy().replace('/', "\\");
-  let script = format!("(Get-Item -LiteralPath '{}' -Force).Target", ps_escape_single(&p_str));
-  if let Ok(out) = Command::new("powershell.exe").args(["-NoProfile", "-Command", &script]).output() {
-    if out.status.success() {
-      let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-      if !s.is_empty() { return Some(PathBuf::from(s)); }
-    }
-  }
-  None
-}
+// Removed: config management for moved mods (feature purged)
 
-fn move_dir(src: &Path, dst: &Path) -> io::Result<()> {
-  if let Some(parent) = dst.parent() { let _ = fs::create_dir_all(parent); }
-  // Try fast rename first (same volume)
-  match fs::rename(src, dst) {
-    Ok(()) => return Ok(()),
-    Err(_e) => {
-      // Fallback to robocopy /MOVE for cross-volume move; treat exit codes < 8 as success
-      let status = Command::new("robocopy")
-        .arg(src)
-        .arg(dst)
-        .args(["/MOVE", "/E", "/R:1", "/W:1"])
-        .status();
-      match status {
-        Ok(s) => {
-          // robocopy returns codes: <8 success; >=8 failure
-          if let Some(code) = s.code() {
-            if code < 8 { return Ok(()); }
-          }
-          Err(io::Error::new(io::ErrorKind::Other, format!("robocopy failed with status {:?}", s.code())))
-        }
-        Err(e2) => Err(io::Error::new(io::ErrorKind::Other, format!("robocopy exec failed: {}", e2)))
-      }
-    }
-  }
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct AppConfig {
-  // legacy: whole workshop folder move (unused now but kept for compatibility)
-  workshop_locations: std::collections::HashMap<String, String>,
-  // new: moved mods folder absolute path
-  mods_locations: std::collections::HashMap<String, String>,
-}
-
-fn config_file_path() -> PathBuf {
-  let base = dirs::config_dir().unwrap_or_else(|| PathBuf::from("C:/"));
-  base.join("pz-13p-launcher").join("config.json")
-}
-
-fn load_config() -> AppConfig {
-  let p = config_file_path();
-  if let Ok(bytes) = fs::read(&p) {
-    if let Ok(cfg) = serde_json::from_slice::<AppConfig>(&bytes) { return cfg; }
-  }
-  AppConfig::default()
-}
-
-fn save_config(cfg: &AppConfig) -> io::Result<()> {
-  let p = config_file_path();
-  if let Some(parent) = p.parent() { let _ = fs::create_dir_all(parent); }
-  let data = serde_json::to_vec_pretty(cfg)?;
-  fs::write(p, data)
-}
-
-#[tauri::command]
-fn move_workshop(workshop_path: String, workshop_id: String, dest_dir: String) -> Result<serde_json::Value, String> {
-  // Move only the internal Zomboid Mods folder: <workshop>/mods/13thPandemic/Zomboid/Mods
-  if workshop_path.is_empty() { return Err("Workshop path is empty".into()); }
-  if dest_dir.is_empty() { return Err("Destination directory is empty".into()); }
-
-  let workshop = Path::new(&workshop_path);
-  if !workshop.exists() { return Err(format!("Workshop path does not exist: {}", workshop.display())); }
-  let zroot = workshop_zomboid_root(workshop);
-  let mods_link = zroot.join("Mods");
-  let dest_parent = Path::new(&dest_dir);
-  if !dest_parent.exists() { fs::create_dir_all(dest_parent).map_err(|e| format!("Failed to create destination: {}", e))?; }
-
-  // Determine new mods target path; if the selected path already ends with 'Mods', use it, else create a 'Mods' under it
-  let new_mods_path = if dest_parent.file_name().map(|n| n.to_string_lossy().eq_ignore_ascii_case("mods")).unwrap_or(false) {
-    dest_parent.to_path_buf()
-  } else {
-    dest_parent.join("Mods")
-  };
-
-  // Determine current real mods folder (handle junction)
-  let mut current_real = mods_link.clone();
-  let was_junction = is_reparse_point(&mods_link);
-  if was_junction {
-    if let Some(t) = query_junction_target(&mods_link) { current_real = t; }
-  }
-
-  // If destination equals current, nothing to move
-  let need_move = new_mods_path.to_string_lossy().to_lowercase() != current_real.to_string_lossy().to_lowercase();
-  if need_move {
-    if new_mods_path.exists() {
-      return Err(format!("Destination already exists: {}", new_mods_path.display()));
-    }
-    move_dir(&current_real, &new_mods_path).map_err(|e| format!("Failed to move mods folder: {}", e))?;
-  }
-
-  // Ensure junction at Zomboid/Mods points to new_mods_path
-  if mods_link.exists() && is_reparse_point(&mods_link) {
-    rmdir_link(&mods_link).map_err(|e| format!("Failed to remove existing mods junction: {}", e))?;
-  } else if mods_link.exists() {
-    // Remove or back up real directory if still present
-    if fs::read_dir(&mods_link).map(|mut it| it.next().is_none()).unwrap_or(false) {
-      fs::remove_dir(&mods_link).ok();
-    } else {
-      let backup = workshop.join(format!("mods_bak_{}", chrono::Utc::now().format("%Y%m%d%H%M%S")));
-      fs::rename(&mods_link, &backup).map_err(|e| format!("Failed to relocate original mods dir: {}", e))?;
-    }
-  }
-  mk_junction(&mods_link, &new_mods_path).map_err(|e| format!("Failed to create mods junction: {}", e))?;
-
-  // Persist new mods location for this workshop id
-  let mut cfg = load_config();
-  cfg.mods_locations.insert(workshop_id.clone(), new_mods_path.to_string_lossy().to_string());
-  save_config(&cfg).map_err(|e| format!("Failed to save config: {}", e))?;
-
-  Ok(serde_json::json!({
-    "new_path": new_mods_path.to_string_lossy().to_string(),
-    "updated_link": true,
-    "was_junction": was_junction
-  }))
-}
-
-#[tauri::command]
-fn restore_workshop(workshop_path: String, workshop_id: String) -> Result<serde_json::Value, String> {
-  // Restore the internal Zomboid Mods folder back to <workshop>/mods/13thPandemic/Zomboid/Mods and remove the junction
-  if workshop_path.is_empty() { return Err("Workshop path is empty".into()); }
-
-  let workshop = Path::new(&workshop_path);
-  let zroot = workshop_zomboid_root(workshop);
-  let mods_link = zroot.join("Mods");
-  let mut real_mods = mods_link.clone();
-  let is_junc = is_reparse_point(&mods_link);
-  if is_junc {
-    real_mods = query_junction_target(&mods_link).ok_or_else(|| "Could not resolve mods junction target".to_string())?;
-    rmdir_link(&mods_link).map_err(|e| format!("Failed to remove mods junction: {}", e))?;
-  } else {
-    // if config points to moved location, use it
-    if let Some(p) = load_config().mods_locations.get(&workshop_id) {
-      real_mods = PathBuf::from(p);
-    }
-  }
-
-  if !real_mods.exists() {
-    return Err(format!("Real mods folder not found: {}", real_mods.display()));
-  }
-  if mods_link.exists() {
-    return Err(format!("Mods path already exists at workshop: {}", mods_link.display()));
-  }
-
-  move_dir(&real_mods, &mods_link).map_err(|e| format!("Failed to move mods back: {}", e))?;
-
-  // Clear persisted location
-  let mut cfg = load_config();
-  cfg.mods_locations.remove(&workshop_id);
-  save_config(&cfg).map_err(|e| format!("Failed to save config: {}", e))?;
-
-  Ok(serde_json::json!({ "restored": true, "path": mods_link.to_string_lossy().to_string() }))
-}
-#[tauri::command]
-fn resolve_workshop_mods(workshop_path: String) -> Result<String, String> {
-  // Returns the real path of <workshop>/mods/13thPandemic/Zomboid/Mods if it's a junction, else the path itself
-  let zroot = workshop_zomboid_root(Path::new(&workshop_path));
-  let mods_link = zroot.join("Mods");
-  if is_reparse_point(&mods_link) {
-    if let Some(t) = query_junction_target(&mods_link) {
-      return Ok(t.to_string_lossy().to_string());
-    }
-  }
-  Ok(mods_link.to_string_lossy().to_string())
-}
-
-#[tauri::command]
-fn resolve_mods(mods_path: String) -> Result<String, String> {
-  let p = Path::new(&mods_path);
-  if is_reparse_point(&p) {
-    if let Some(t) = query_junction_target(&p) {
-      return Ok(t.to_string_lossy().to_string());
-    }
-  }
-  Ok(mods_path)
-}
+// Removed: move/restore and resolve commands (feature purged)
 
 #[tauri::command]
 fn open_path(path: String) -> Result<(), String> {
@@ -411,6 +226,88 @@ fn workshop_zomboid_root(real_workshop_path: &Path) -> PathBuf {
     .join("Zomboid")
 }
 
+fn pz_install_dir(steam_root: &str) -> Option<PathBuf> {
+  for lib in parse_libraryfolders(steam_root) {
+    let p = lib.join("common").join("ProjectZomboid");
+    if p.exists() { return Some(p); }
+  }
+  None
+}
+
+fn list_files_recursive(root: &Path) -> io::Result<Vec<PathBuf>> {
+  let mut files = Vec::new();
+  let mut stack = vec![root.to_path_buf()];
+  while let Some(dir) = stack.pop() {
+    for ent in fs::read_dir(&dir)? {
+      let ent = ent?;
+      let p = ent.path();
+      if p.is_dir() { stack.push(p); } else { files.push(p); }
+    }
+  }
+  Ok(files)
+}
+
+fn files_already_applied(src_root: &Path, dst_root: &Path) -> bool {
+  if !src_root.exists() || !dst_root.exists() { return false; }
+  let src_files = match list_files_recursive(src_root) { Ok(v) => v, Err(_) => return false };
+  for s in src_files {
+    let rel = match s.strip_prefix(src_root) { Ok(r) => r, Err(_) => return false };
+    let d = dst_root.join(rel);
+    let sm = match fs::metadata(&s) { Ok(m) => m, Err(_) => return false };
+    let dm = match fs::metadata(&d) { Ok(m) => m, Err(_) => return false };
+    if sm.len() != dm.len() { return false; }
+  }
+  true
+}
+
+fn copy_dir_replace(src_root: &Path, dst_root: &Path) -> io::Result<(u64, u64)> {
+  let mut copied: u64 = 0;
+  let mut replaced: u64 = 0;
+  for s in list_files_recursive(src_root)? {
+    let rel = s.strip_prefix(src_root).unwrap();
+    let d = dst_root.join(rel);
+    if let Some(parent) = d.parent() { fs::create_dir_all(parent)?; }
+    if d.exists() { fs::copy(&s, &d)?; replaced += 1; } else { fs::copy(&s, &d)?; copied += 1; }
+  }
+  Ok((copied, replaced))
+}
+
+#[tauri::command]
+fn resolve_game_root() -> Result<String, String> {
+  let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
+  let p = pz_install_dir(&steam_root).ok_or_else(|| "Project Zomboid install not found".to_string())?;
+  Ok(p.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn apply_optimizations(workshop_path: String) -> Result<serde_json::Value, String> {
+  if workshop_path.is_empty() { return Err("Workshop path is empty".into()); }
+  let steam_root = steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
+  // Source: <workshop>\mods\13thPandemic\ProjectZomboid
+  let src = Path::new(&workshop_path).join("mods").join("13thPandemic").join("ProjectZomboid");
+  if !src.exists() { return Err(format!("Optimizations folder not found: {}", src.display())); }
+  let dest = pz_install_dir(&steam_root).ok_or_else(|| "Could not locate ProjectZomboid install directory".to_string())?;
+
+  if files_already_applied(&src, &dest) {
+    return Ok(serde_json::json!({
+      "already": true,
+      "applied": false,
+      "source": src.to_string_lossy().to_string(),
+      "dest": dest.to_string_lossy().to_string()
+    }));
+  }
+
+  let (copied, replaced) = copy_dir_replace(&src, &dest).map_err(|e| e.to_string())?;
+  Ok(serde_json::json!({
+    "already": false,
+    "applied": true,
+    "copied": copied,
+    "replaced": replaced,
+    "source": src.to_string_lossy().to_string(),
+    "dest": dest.to_string_lossy().to_string()
+  }))
+}
+
 #[tauri::command]
 fn play(appid: String, _workshop_id: String, workshop_path: String) -> Result<(), String> {
   // Ensure Steam is running before launching PZ
@@ -476,7 +373,7 @@ fn main() {
   tauri::Builder::default()
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_opener::init())
-    .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play, move_workshop, resolve_workshop_mods, resolve_mods, restore_workshop, open_path])
+    .invoke_handler(tauri::generate_handler![auto_detect, open_workshop, link_all, cleanup, play, open_path, apply_optimizations, resolve_game_root])
 
     .run(tauri::generate_context!())
     .expect("error while running tauri app");
