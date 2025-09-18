@@ -1,108 +1,135 @@
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
-import App from './app';
-import { invoke } from '@tauri-apps/api/core';
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import App from "./app";
+import { invoke } from "@tauri-apps/api/core";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }));
+const listeners: Record<string, (event: { payload?: Record<string, unknown> }) => void> = {};
+const listenMock = vi.fn(
+  (
+    event: string,
+    handler: (event: { payload?: Record<string, unknown> }) => void
+  ): Promise<() => void> => {
+    listeners[event] = handler;
+    return Promise.resolve(() => {
+      delete listeners[event];
+    });
+  }
+);
 
-describe('App', () => {
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+
+describe("App", () => {
   let invokeMock: Mock;
 
   beforeEach(() => {
     invokeMock = invoke as Mock;
     invokeMock.mockReset();
-    invokeMock.mockResolvedValue(undefined);
+    listenMock.mockClear();
+    for (const key of Object.keys(listeners)) {
+      delete listeners[key];
+    }
   });
 
-  it('shows download state and opens workshop on click', async () => {
-    invokeMock.mockResolvedValueOnce({ steam_root: '', workshop_path: '', mods_path: '' });
+  it("shows download state and opens workshop on click", async () => {
+    invokeMock
+      .mockResolvedValueOnce({ steam_root: "", workshop_path: "" })
+      .mockResolvedValueOnce("");
 
     render(<App />);
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('auto_detect', { workshopId: '3487726294' })
+      expect(invokeMock).toHaveBeenCalledWith("auto_detect", {
+        workshopId: "3487726294",
+      })
     );
-
-    expect(screen.getByText(/Mod not found/i)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/Mod not found/i)).toBeInTheDocument());
 
     invokeMock.mockClear();
+    const downloadBtn = screen.getByRole("button", { name: "Download" });
 
-    const downloadBtn = screen.getByRole('button', { name: 'Download' });
+    invokeMock.mockResolvedValueOnce(undefined);
     fireEvent.click(downloadBtn);
+
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('open_workshop', { workshopId: '3487726294' })
+      expect(invokeMock).toHaveBeenCalledWith("open_workshop", {
+        workshopId: "3487726294",
+      })
     );
   });
 
-  it('auto-detects workshop and plays the game', async () => {
+  it("auto-detects workshop and plays the game", async () => {
     invokeMock
-      .mockResolvedValueOnce({ steam_root: '', workshop_path: 'wp', mods_path: 'mods' })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({ steam_root: "root", workshop_path: "wp" })
+      .mockResolvedValueOnce("game-root");
 
     render(<App />);
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('auto_detect', { workshopId: '3487726294' })
+      expect(invokeMock).toHaveBeenCalledWith("auto_detect", {
+        workshopId: "3487726294",
+      })
     );
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('cleanup', { modsPath: 'mods' })
-    );
+
+    const playBtn = await screen.findByRole("button", { name: "Play" });
 
     invokeMock.mockClear();
-    invokeMock
-      .mockResolvedValueOnce({ linked: 1, backups: 0 })
-      .mockResolvedValueOnce(undefined)
-      .mockResolvedValueOnce({});
+    invokeMock.mockResolvedValueOnce(undefined);
 
-    const playBtn = screen.getByRole('button', { name: 'Play' });
     fireEvent.click(playBtn);
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('link_all', { workshopPath: 'wp', modsPath: 'mods' })
+      expect(invokeMock).toHaveBeenCalledWith("play", {
+        appid: "108600",
+        workshopId: "3487726294",
+        workshopPath: "wp",
+      })
     );
-    expect(invokeMock).toHaveBeenCalledWith('play', { appid: '108600' });
-    expect(invokeMock).toHaveBeenCalledWith('cleanup', { modsPath: 'mods' });
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled());
+    listeners["pz-session-ended"]?.({ payload: { cachedir: "wp", found: true } });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Play" })).toBeEnabled()
+    );
   });
 
-  it('refreshes detection and updates to ready state', async () => {
+  it("refreshes detection and updates to ready state", async () => {
     invokeMock
-      .mockResolvedValueOnce({ steam_root: '', workshop_path: '', mods_path: '' })
-      .mockResolvedValueOnce({ steam_root: '', workshop_path: 'wp', mods_path: 'mods' })
-      .mockResolvedValueOnce({});
+      .mockResolvedValueOnce({ steam_root: "", workshop_path: "" })
+      .mockResolvedValueOnce("");
 
     render(<App />);
 
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('auto_detect', { workshopId: '3487726294' })
-    );
+    const refreshBtn = await screen.findByRole("button", { name: "Refresh" });
 
-    const refreshBtn = await screen.findByRole('button', { name: 'Refresh' });
-    invokeMock.mockClear();
+    invokeMock
+      .mockResolvedValueOnce({ steam_root: "root", workshop_path: "wp" })
+      .mockResolvedValueOnce("game-root");
+
     fireEvent.click(refreshBtn);
 
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('auto_detect', { workshopId: '3487726294' })
+      expect(invokeMock).toHaveBeenCalledWith("auto_detect", {
+        workshopId: "3487726294",
+      })
     );
+
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith('cleanup', { modsPath: 'mods' })
+      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument()
     );
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument());
   });
 
-  it('toggles debug overlay', async () => {
-    invokeMock.mockResolvedValueOnce({ steam_root: '', workshop_path: '', mods_path: '' });
+  it("toggles debug overlay", async () => {
+    invokeMock
+      .mockResolvedValueOnce({ steam_root: "", workshop_path: "" })
+      .mockResolvedValueOnce("");
 
     render(<App />);
 
-    await waitFor(() => expect(invokeMock).toHaveBeenCalled());
-
-    const toggle = screen.getByTitle('Show Debug Info');
+    const toggle = await screen.findByTitle("Show Settings & Console");
     fireEvent.click(toggle);
-    expect(await screen.findByText('Steam root')).toBeInTheDocument();
-    fireEvent.click(toggle);
-    await waitFor(() => expect(screen.queryByText('Steam root')).toBeNull());
+    expect(await screen.findByText("Steam root")).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle("Hide Settings & Console"));
+    await waitFor(() => expect(screen.queryByText("Steam root")).toBeNull());
   });
 });
-

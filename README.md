@@ -2,7 +2,7 @@
 
 # PZ 13th Pandemic Launcher
 
-<p>A polished Windows launcher for the Project Zomboid "13th Pandemic" modpack. Detect, link, optimize, and play in one click.</p>
+<p>A polished Windows launcher for the Project Zomboid "13th Pandemic" modpack. Detect, launch, optimize, and play in one click.</p>
 
 <p>
   <img alt="Tauri" src="https://img.shields.io/badge/Tauri-2.x-24C8DB?logo=tauri&logoColor=white&style=for-the-badge" />
@@ -23,29 +23,26 @@
 
 ## Highlights
 
-- Smart auto‑detect of Steam and Workshop locations
-- One‑click “Download” opens the Workshop mod page in Steam
-- One‑click “Play” launches PZ with the correct `-cachedir`
-- Safe mod linking: creates junctions and backs up your original mods
-- Apply Optimizations: copies performance files into the PZ install folder
-- Built‑in logging and a minimal settings panel
+- Smart auto-detect of Steam and Workshop locations
+- One-click Download opens the Workshop mod page in Steam
+- One-click Play launches PZ with the correct `-cachedir`
+- Optional optimizations copy performance files into the PZ install folder
+- Built-in logging and a minimal settings panel
 
 > Windows only. Tested with Steam installs and Workshop ID 3487726294.
 
 ## Quick Start
 
-1) Subscribe to the 13th Pandemic Workshop mod (or click “Download” in the app).
-2) Click “Refresh” once Steam finishes downloading the mod.
-3) Optional: open Settings → “Apply Optimizations” to copy extra performance files into your PZ install (skips if already applied).
-4) Click “Play”. The launcher starts Steam (if needed), sets `-cachedir` to the mod’s Zomboid folder, and joins the server.
+1) Subscribe to the 13th Pandemic Workshop mod (or click "Download" in the app).
+2) Click "Refresh" once Steam finishes downloading the mod.
+3) Optional: open Settings ? "Apply Optimizations" to copy extra performance files into your PZ install (skips if already applied).
+4) Click "Play". The launcher starts Steam (if needed), sets `-cachedir` to the mod's Zomboid folder, and joins the server.
 
 ## How It Works
 
 - Detects Steam via registry, finds your Workshop libraries, and locates the mod folder.
-- Links submods into your user mods directory using directory junctions.
-- Launches PZ through Steam with `-cachedir` pointing to the pseudo mod’s Zomboid folder.
-- On cleanup, removes junctions and restores any backups.
-- Optimizations (optional): copies everything from `<workshop>\mods\13thPandemic\ProjectZomboid` into `...\steamapps\common\ProjectZomboid` and remembers if already applied (by file sizes).
+- Launches Project Zomboid through Steam with `-cachedir` pointing to the pseudo mod's Zomboid folder.
+- Provides an optional optimization step that syncs the workshop's performance files into the game install if needed.
 
 ## Screenshots
 
@@ -94,12 +91,10 @@ bun test             # or npm test
 
 ## Troubleshooting
 
-- “Mod not found” → Click “Download” to open Steam; subscribe and wait for download, then press “Refresh”.
-- “Optimizations already applied” → The optimization files in your game folder match the workshop versions. No action needed.
-- Symlink/junction errors → Run the launcher as Administrator and ensure antivirus isn’t blocking junction creation.
-- Steam not detected → Make sure Steam is installed and has run at least once on this account.
+- "Mod not found" ? Click "Download" to open Steam; subscribe and wait for the download, then press "Refresh".
+- "Optimizations already applied" ? The optimization files in your game folder match the workshop versions. No action needed.
+- Steam not detected ? Make sure Steam is installed and has run at least once on this account.
 
 ## Contributing
 
 PRs welcome! Please run lint, tests, and `cargo check` before submitting. Keep changes focused and consistent with the current style.
-
