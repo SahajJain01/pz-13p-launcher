@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import App from "./app";
 import { invoke } from "@tauri-apps/api/core";
 import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
@@ -18,9 +18,50 @@ const listenMock = vi.fn(
 
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: vi.fn(() => Promise.resolve()) }));
 
 describe("App", () => {
   let invokeMock: Mock;
+
+  const setupInvokeMock = ({
+    autoDetectQueue = [{ steam_root: "", workshop_path: "" }],
+    gameRoot = "",
+    optimizationsApplied = false,
+    serverStatus = { ip: "16.102.174.79", ping_ms: 50 },
+  }: {
+    autoDetectQueue?: Array<{ steam_root: string; workshop_path: string }>;
+    gameRoot?: string;
+    optimizationsApplied?: boolean;
+    serverStatus?: { ip: string; ping_ms: number | null };
+  } = {}) => {
+    const queue = [...autoDetectQueue];
+    let lastAutoDetect = queue[0] ?? { steam_root: "", workshop_path: "" };
+
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "auto_detect": {
+          if (queue.length > 0) {
+            lastAutoDetect = queue.shift() ?? lastAutoDetect;
+          }
+          return Promise.resolve(lastAutoDetect);
+        }
+        case "resolve_game_root":
+          return Promise.resolve(gameRoot);
+        case "check_optimizations":
+          return Promise.resolve(optimizationsApplied);
+        case "get_server_status":
+          return Promise.resolve(serverStatus);
+        case "open_workshop":
+        case "play":
+        case "append_launcher_log":
+        case "write_launcher_log":
+        case "open_launcher_log":
+          return Promise.resolve();
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+  };
 
   beforeEach(() => {
     invokeMock = invoke as Mock;
@@ -32,9 +73,7 @@ describe("App", () => {
   });
 
   it("shows download state and opens workshop on click", async () => {
-    invokeMock
-      .mockResolvedValueOnce({ steam_root: "", workshop_path: "" })
-      .mockResolvedValueOnce("");
+    setupInvokeMock();
 
     render(<App />);
 
@@ -43,13 +82,12 @@ describe("App", () => {
         workshopId: "3487726294",
       })
     );
-    await waitFor(() => expect(screen.getByText(/Mod not found/i)).toBeInTheDocument());
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("resolve_game_root"));
 
     invokeMock.mockClear();
-    const downloadBtn = screen.getByRole("button", { name: "Download" });
+    const bannerBtn = await screen.findByRole("button", { name: "Home Banner" });
 
-    invokeMock.mockResolvedValueOnce(undefined);
-    fireEvent.click(downloadBtn);
+    fireEvent.click(bannerBtn);
 
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("open_workshop", {
@@ -59,9 +97,11 @@ describe("App", () => {
   });
 
   it("auto-detects workshop and plays the game", async () => {
-    invokeMock
-      .mockResolvedValueOnce({ steam_root: "root", workshop_path: "wp" })
-      .mockResolvedValueOnce("game-root");
+    setupInvokeMock({
+      autoDetectQueue: [{ steam_root: "root", workshop_path: "wp" }],
+      gameRoot: "game-root",
+      optimizationsApplied: false,
+    });
 
     render(<App />);
 
@@ -71,10 +111,14 @@ describe("App", () => {
       })
     );
 
-    const playBtn = await screen.findByRole("button", { name: "Play" });
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("check_optimizations", {
+        workshopPath: "wp",
+      })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Play Tab" }));
 
-    invokeMock.mockClear();
-    invokeMock.mockResolvedValueOnce(undefined);
+    const playBtn = await screen.findByRole("button", { name: /^PLAY$/ });
 
     fireEvent.click(playBtn);
 
@@ -83,29 +127,33 @@ describe("App", () => {
         appid: "108600",
         workshopId: "3487726294",
         workshopPath: "wp",
+        extraArgs: null,
       })
     );
 
-    listeners["pz-session-ended"]?.({ payload: { cachedir: "wp", found: true } });
+    await act(async () => {
+      listeners["pz-session-ended"]?.({ payload: { cachedir: "wp", found: true } });
+    });
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Play" })).toBeEnabled()
+      expect(screen.getByRole("button", { name: /^PLAY$/ })).toBeEnabled()
     );
   });
 
   it("refreshes detection and updates to ready state", async () => {
-    invokeMock
-      .mockResolvedValueOnce({ steam_root: "", workshop_path: "" })
-      .mockResolvedValueOnce("");
+    setupInvokeMock({
+      autoDetectQueue: [
+        { steam_root: "", workshop_path: "" },
+        { steam_root: "root", workshop_path: "wp" },
+      ],
+      gameRoot: "game-root",
+      optimizationsApplied: false,
+    });
 
     render(<App />);
 
-    const refreshBtn = await screen.findByRole("button", { name: "Refresh" });
-
-    invokeMock
-      .mockResolvedValueOnce({ steam_root: "root", workshop_path: "wp" })
-      .mockResolvedValueOnce("game-root");
-
+    fireEvent.click(screen.getByRole("button", { name: "Config Tab" }));
+    const refreshBtn = await screen.findByRole("button", { name: "Refresh status" });
     fireEvent.click(refreshBtn);
 
     await waitFor(() =>
@@ -114,22 +162,18 @@ describe("App", () => {
       })
     );
 
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Play" })).toBeInTheDocument()
-    );
+    await waitFor(() => expect(screen.getByText("ONLINE")).toBeInTheDocument());
   });
 
-  it("toggles debug overlay", async () => {
-    invokeMock
-      .mockResolvedValueOnce({ steam_root: "", workshop_path: "" })
-      .mockResolvedValueOnce("");
+  it("switches to the settings tab", async () => {
+    setupInvokeMock();
 
     render(<App />);
 
-    const toggle = await screen.findByTitle("Show Settings & Console");
-    fireEvent.click(toggle);
-    expect(await screen.findByText("Steam root")).toBeInTheDocument();
-    fireEvent.click(screen.getByTitle("Hide Settings & Console"));
-    await waitFor(() => expect(screen.queryByText("Steam root")).toBeNull());
+    const configTab = await screen.findByRole("button", { name: "Config Tab" });
+    fireEvent.click(configTab);
+    expect(
+      await screen.findByText("Launcher configuration, folders, and diagnostics.")
+    ).toBeInTheDocument();
   });
 });

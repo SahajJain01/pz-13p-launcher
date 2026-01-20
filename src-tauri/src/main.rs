@@ -1,13 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use winreg::{enums::HKEY_CURRENT_USER, RegKey};
 
 use sysinfo::System;
 use tauri::Emitter;
 
 use std::{
-    fs, io,
+    fs,
+    io::{self, Read, Write},
+    net::ToSocketAddrs,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -15,13 +18,31 @@ use std::{
 };
 
 const APPID: &str = "108600"; // PZ
-const SERVER_IP: &str = "pz.13thpandemic.net";
+const SERVER_IP: &str = "13thpandemic.mywire.org";
 const SERVER_PORT: u16 = 16261;
 
 #[derive(Serialize)]
 struct DetectResp {
     steam_root: String,
     workshop_path: String,
+}
+
+#[derive(Serialize)]
+struct ServerStatus {
+    ip: String,
+    ping_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct ManifestEntry {
+    path: String,
+    size: u64,
+    hash: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OptimizationManifest {
+    entries: Vec<ManifestEntry>,
 }
 
 fn steam_root_from_registry() -> Option<String> {
@@ -88,11 +109,6 @@ fn auto_detect(workshop_id: String) -> DetectResp {
             workshop_path,
         };
     }
-    // If the mod folder is not found, open the workshop page for the user to subscribe
-    if workshop_path.is_empty() || !Path::new(&workshop_path).exists() {
-        let url = format!("steam://url/CommunityFilePage/{}", workshop_id);
-        let _ = open::that(url);
-    }
     DetectResp {
         steam_root,
         workshop_path,
@@ -118,6 +134,64 @@ fn workshop_zomboid_root(real_workshop_path: &Path) -> PathBuf {
         .join("mods")
         .join("13thPandemic")
         .join("Zomboid")
+}
+
+fn ping_host(host: &str) -> Option<u64> {
+    let output = Command::new("ping")
+        .arg("-n")
+        .arg("1")
+        .arg("-w")
+        .arg("1000")
+        .arg(host)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let re = Regex::new(r"time[=<]\s*(\d+)\s*ms").ok()?;
+    let caps = re.captures(&stdout)?;
+    let value = caps.get(1)?.as_str().parse::<u64>().ok()?;
+    Some(value)
+}
+
+#[tauri::command]
+fn get_server_status(host: String) -> Result<ServerStatus, String> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err("Host is empty".into());
+    }
+    let mut addrs = (host, 0)
+        .to_socket_addrs()
+        .map_err(|e| format!("Failed to resolve {}: {}", host, e))?;
+    let ip = addrs
+        .next()
+        .ok_or_else(|| format!("No IP address found for {}", host))?
+        .ip()
+        .to_string();
+    let ping_ms = ping_host(host);
+    Ok(ServerStatus { ip, ping_ms })
+}
+
+fn launcher_root(real_workshop_path: &Path) -> PathBuf {
+    real_workshop_path
+        .join("mods")
+        .join("13thPandemic")
+        .join("Launcher")
+}
+
+fn launcher_backup_root(real_workshop_path: &Path) -> PathBuf {
+    launcher_root(real_workshop_path)
+        .join("backup")
+        .join("ProjectZomboid")
+}
+
+fn optimization_manifest_path(real_workshop_path: &Path) -> PathBuf {
+    launcher_root(real_workshop_path).join("optimizations.json")
+}
+
+fn launcher_log_path(real_workshop_path: &Path) -> PathBuf {
+    launcher_root(real_workshop_path).join("debug.txt")
 }
 
 fn pz_install_dir(steam_root: &str) -> Option<PathBuf> {
@@ -147,40 +221,143 @@ fn list_files_recursive(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn files_already_applied(src_root: &Path, dst_root: &Path) -> bool {
-    if !dst_root.exists() {
-        return false;
-    }
-    let Ok(src_files) = list_files_recursive(src_root) else {
-        return false;
-    };
-    if src_files.is_empty() {
-        return false;
-    }
-    for s in src_files {
-        let rel = match s.strip_prefix(src_root) {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        let d = dst_root.join(rel);
-        let sm = match fs::metadata(&s) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        let dm = match fs::metadata(&d) {
-            Ok(m) => m,
-            Err(_) => return false,
-        };
-        if sm.len() != dm.len() {
-            return false;
+fn file_sha256(path: &Path) -> io::Result<String> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
         }
+        hasher.update(&buffer[..read]);
     }
-    true
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        hex.push_str(&format!("{:02x}", byte));
+    }
+    Ok(hex)
 }
 
-fn copy_dir_replace(src_root: &Path, dst_root: &Path) -> io::Result<(u64, u64)> {
+fn build_manifest(root: &Path) -> io::Result<Vec<ManifestEntry>> {
+    let mut files = list_files_recursive(root)?;
+    files.sort();
+    let mut entries = Vec::with_capacity(files.len());
+    for path in files {
+        let rel = path
+            .strip_prefix(root)
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Invalid manifest path"))?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        let size = fs::metadata(&path)?.len();
+        let hash = file_sha256(&path)?;
+        entries.push(ManifestEntry {
+            path: rel_str,
+            size,
+            hash,
+        });
+    }
+    Ok(entries)
+}
+
+fn write_manifest(path: &Path, entries: &[ManifestEntry]) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let manifest = OptimizationManifest {
+        entries: entries.to_vec(),
+    };
+    let json =
+        serde_json::to_string_pretty(&manifest).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+fn read_manifest(path: &Path) -> io::Result<OptimizationManifest> {
+    let raw = fs::read_to_string(path)?;
+    serde_json::from_str(&raw).map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+}
+
+fn manifest_matches_dest(entries: &[ManifestEntry], dst_root: &Path) -> io::Result<bool> {
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    for entry in entries {
+        let dest_path = dst_root.join(Path::new(&entry.path));
+        let meta = match fs::metadata(&dest_path) {
+            Ok(m) => m,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if meta.len() != entry.size {
+            return Ok(false);
+        }
+        let hash = file_sha256(&dest_path)?;
+        if hash != entry.hash {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn manifest_matches_src(entries: &[ManifestEntry], src_root: &Path) -> io::Result<bool> {
+    if entries.is_empty() {
+        return Ok(false);
+    }
+    let src_files = list_files_recursive(src_root)?;
+    if src_files.len() != entries.len() {
+        return Ok(false);
+    }
+    for entry in entries {
+        let src_path = src_root.join(Path::new(&entry.path));
+        let meta = match fs::metadata(&src_path) {
+            Ok(m) => m,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        if meta.len() != entry.size {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn optimizations_applied(
+    src_root: &Path,
+    dst_root: &Path,
+    manifest_path: &Path,
+) -> io::Result<bool> {
+    if !dst_root.exists() {
+        return Ok(false);
+    }
+    if manifest_path.exists() {
+        let manifest = read_manifest(manifest_path)?;
+        if manifest_matches_src(&manifest.entries, src_root)? {
+            return manifest_matches_dest(&manifest.entries, dst_root);
+        }
+        let entries = build_manifest(src_root)?;
+        let matches = manifest_matches_dest(&entries, dst_root)?;
+        if matches {
+            write_manifest(manifest_path, &entries)?;
+        }
+        return Ok(matches);
+    }
+    let entries = build_manifest(src_root)?;
+    let matches = manifest_matches_dest(&entries, dst_root)?;
+    if matches {
+        write_manifest(manifest_path, &entries)?;
+    }
+    Ok(matches)
+}
+
+fn copy_dir_replace(
+    src_root: &Path,
+    dst_root: &Path,
+    backup_root: Option<&Path>,
+) -> io::Result<(u64, u64, u64)> {
     let mut copied: u64 = 0;
     let mut replaced: u64 = 0;
+    let mut backed_up: u64 = 0;
     for s in list_files_recursive(src_root)? {
         let rel = s.strip_prefix(src_root).unwrap();
         let d = dst_root.join(rel);
@@ -188,6 +365,16 @@ fn copy_dir_replace(src_root: &Path, dst_root: &Path) -> io::Result<(u64, u64)> 
             fs::create_dir_all(parent)?;
         }
         if d.exists() {
+            if let Some(backup_root) = backup_root {
+                let backup_path = backup_root.join(rel);
+                if !backup_path.exists() {
+                    if let Some(parent) = backup_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+                    fs::copy(&d, &backup_path)?;
+                    backed_up += 1;
+                }
+            }
             fs::copy(&s, &d)?;
             replaced += 1;
         } else {
@@ -195,7 +382,7 @@ fn copy_dir_replace(src_root: &Path, dst_root: &Path) -> io::Result<(u64, u64)> 
             copied += 1;
         }
     }
-    Ok((copied, replaced))
+    Ok((copied, replaced, backed_up))
 }
 
 #[tauri::command]
@@ -224,25 +411,103 @@ fn apply_optimizations(workshop_path: String) -> Result<serde_json::Value, Strin
     }
     let dest = pz_install_dir(&steam_root)
         .ok_or_else(|| "Could not locate ProjectZomboid install directory".to_string())?;
+    let manifest_path = optimization_manifest_path(Path::new(&workshop_path));
 
-    if files_already_applied(&src, &dest) {
+    if optimizations_applied(&src, &dest, &manifest_path).map_err(|e| e.to_string())? {
         return Ok(serde_json::json!({
           "already": true,
           "applied": false,
           "source": src.to_string_lossy().to_string(),
-          "dest": dest.to_string_lossy().to_string()
+          "dest": dest.to_string_lossy().to_string(),
+          "manifest": manifest_path.to_string_lossy().to_string()
         }));
     }
 
-    let (copied, replaced) = copy_dir_replace(&src, &dest).map_err(|e| e.to_string())?;
+    let backup_root = launcher_backup_root(Path::new(&workshop_path));
+    fs::create_dir_all(&backup_root).map_err(|e| e.to_string())?;
+    let (copied, replaced, backed_up) =
+        copy_dir_replace(&src, &dest, Some(&backup_root)).map_err(|e| e.to_string())?;
+    let entries = build_manifest(&src).map_err(|e| e.to_string())?;
+    write_manifest(&manifest_path, &entries).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
       "already": false,
       "applied": true,
       "copied": copied,
       "replaced": replaced,
+      "backed_up": backed_up,
       "source": src.to_string_lossy().to_string(),
-      "dest": dest.to_string_lossy().to_string()
+      "dest": dest.to_string_lossy().to_string(),
+      "backup_root": backup_root.to_string_lossy().to_string(),
+      "manifest": manifest_path.to_string_lossy().to_string()
     }))
+}
+
+#[tauri::command]
+fn check_optimizations(workshop_path: String) -> Result<bool, String> {
+    if workshop_path.is_empty() {
+        return Err("Workshop path is empty".into());
+    }
+    let steam_root =
+        steam_root_from_registry().unwrap_or_else(|| "C:/Program Files (x86)/Steam".to_string());
+    let src = Path::new(&workshop_path)
+        .join("mods")
+        .join("13thPandemic")
+        .join("ProjectZomboid");
+    if !src.exists() {
+        return Err(format!("Optimizations folder not found: {}", src.display()));
+    }
+    let dest = pz_install_dir(&steam_root)
+        .ok_or_else(|| "Could not locate ProjectZomboid install directory".to_string())?;
+    let manifest_path = optimization_manifest_path(Path::new(&workshop_path));
+    optimizations_applied(&src, &dest, &manifest_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn open_launcher_log(workshop_path: String) -> Result<String, String> {
+    if workshop_path.is_empty() {
+        return Err("Workshop path is empty".into());
+    }
+    let log_path = launcher_log_path(Path::new(&workshop_path));
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    if !log_path.exists() {
+        fs::write(&log_path, "").map_err(|e| e.to_string())?;
+    }
+    open::that(&log_path).map_err(|e| e.to_string())?;
+    Ok(log_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn append_launcher_log(workshop_path: String, entry: String) -> Result<(), String> {
+    if workshop_path.is_empty() {
+        return Err("Workshop path is empty".into());
+    }
+    let log_path = launcher_log_path(Path::new(&workshop_path));
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| e.to_string())?;
+    file.write_all(entry.as_bytes())
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn write_launcher_log(workshop_path: String, contents: String) -> Result<(), String> {
+    if workshop_path.is_empty() {
+        return Err("Workshop path is empty".into());
+    }
+    let log_path = launcher_log_path(Path::new(&workshop_path));
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(&log_path, contents).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -251,6 +516,7 @@ fn play(
     appid: String,
     _workshop_id: String,
     workshop_path: String,
+    extra_args: Option<Vec<String>>,
 ) -> Result<(), String> {
     if workshop_path.is_empty() {
         return Err("Workshop path is empty".into());
@@ -280,12 +546,21 @@ fn play(
     // Launch Steam -> PZ with -cachedir and auto-connect using -applaunch
     let steam_exe = Path::new(&steam_root).join("steam.exe");
     let cachedir_arg = format!("-cachedir={}", cachedir_windows);
-    Command::new(&steam_exe)
+    let mut command = Command::new(&steam_exe);
+    command
         .arg("-applaunch")
         .arg(appid)
         .arg(&cachedir_arg)
         .arg(format!("-connect={}", SERVER_IP))
-        .arg(format!("-port={}", SERVER_PORT))
+        .arg(format!("-port={}", SERVER_PORT));
+    if let Some(extra_args) = extra_args {
+        for arg in extra_args {
+            if !arg.trim().is_empty() {
+                command.arg(arg);
+            }
+        }
+    }
+    command
         .spawn()
         .map_err(|e| format!("Failed to launch Steam/PZ: {}", e))?;
 
@@ -341,10 +616,15 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             auto_detect,
             open_workshop,
+            get_server_status,
             play,
             open_path,
             apply_optimizations,
-            resolve_game_root
+            resolve_game_root,
+            check_optimizations,
+            open_launcher_log,
+            append_launcher_log,
+            write_launcher_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri app");
